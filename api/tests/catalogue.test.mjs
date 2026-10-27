@@ -1,24 +1,26 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { randomBytes } from "node:crypto";
 import { after, before, test } from "node:test";
 import functions from "@azure/functions";
 import { validateCatalogue } from "../dist/src/game/catalogue.js";
 import { MYTHS } from "../dist/src/game/myths.js";
 import { pinnedMyth, randomMyth } from "../dist/src/game/pick.js";
 import { CatalogueConflict, createCatalogueHandler } from "../dist/api/src/handler.js";
-import { createBlobStore } from "../dist/api/src/store.js";
+import { createBlobStore, createLoginLimiter } from "../dist/api/src/store.js";
+import { hashPassword, issueSession, readAuthConfig } from "../dist/api/src/auth.js";
 
-const principal = (patch = {}) => Buffer.from(JSON.stringify({
-  identityProvider: "aad", userId: "tenant-user", userRoles: ["anonymous", "authenticated"], ...patch,
-})).toString("base64");
+process.env.EDITOR_PASSWORD_HASH = await hashPassword("test-only catalogue editor passphrase");
+process.env.EDITOR_SESSION_SECRET = randomBytes(32).toString("base64url");
+const editorCookie = issueSession(readAuthConfig()).split(";")[0];
 const { HttpRequest } = functions;
 const context = { error() {} };
 function request({ method = "PUT", headers = {}, body = JSON.stringify(MYTHS) } = {}) {
   return new HttpRequest({
     method, url: "https://game.example/api/myths",
     headers: {
-      "x-ms-client-principal": principal(), "content-type": "application/json",
+      cookie: editorCookie, "content-type": "application/json",
       "x-catalogue-request": "1", "if-match": "seed", ...headers,
     },
     ...(method === "GET" ? {} : { body: { string: body } }),
@@ -97,12 +99,15 @@ test("anonymous users can read without changing storage", async () => {
   assert.equal(f.writes(), 0);
 });
 
-test("anonymous, malformed, unauthenticated and non-Microsoft principals cannot write", async () => {
+test("anonymous, malformed, expired and forged sessions cannot write; Entra headers grant no access", async () => {
   const f = fixture();
-  for (const header of ["", "not-base64", Buffer.from("null").toString("base64"),
-    principal({ identityProvider: "github" }), principal({ userRoles: ["anonymous"] }),
-    principal({ userId: "" })]) {
-    const result = await f.handler(request({ headers: { "x-ms-client-principal": header } }), context);
+  for (const cookie of ["", "bad-cookie", "__Host-sovereignty-editor=fake",
+    issueSession(readAuthConfig(), Date.now() - 8 * 60 * 60 * 1000).split(";")[0],
+    `${editorCookie}tampered`]) {
+    const principal = Buffer.from(JSON.stringify({
+      identityProvider: "aad", userId: "tenant-user", userRoles: ["authenticated"],
+    })).toString("base64");
+    const result = await f.handler(request({ headers: { cookie, "x-ms-client-principal": principal } }), context);
     assert.equal(result.status, 401);
   }
   assert.equal(f.writes(), 0);
@@ -118,7 +123,7 @@ test("cross-origin and non-JSON writes are rejected", async () => {
   assert.equal(f.writes(), 0);
 });
 
-test("tenant-authenticated users publish all content fields and reads see the new data", async () => {
+test("password-authenticated editors publish all content fields and reads see the new data", async () => {
   const f = fixture();
   const draft = structuredClone(MYTHS);
   draft[0].summary = "Updated summary";
@@ -167,16 +172,28 @@ test("storage failures are logged and returned as explicit failures", async () =
   assert.equal(logs.length, 2);
 });
 
-test("deployment restricts Microsoft authentication to the exact tenant and protects writes", async () => {
+test("missing password configuration blocks editor sessions but leaves public gameplay available", async () => {
+  const f = fixture();
+  const previous = process.env.EDITOR_PASSWORD_HASH;
+  const logs = [];
+  try {
+    delete process.env.EDITOR_PASSWORD_HASH;
+    assert.equal((await f.handler(request(), { error: (...args) => logs.push(args) })).status, 503);
+    assert.equal((await f.handler(request({ method: "GET", headers: { cookie: "" } }), context)).status, 200);
+    assert.equal(f.writes(), 0);
+    assert.equal(logs.length, 1);
+  } finally {
+    process.env.EDITOR_PASSWORD_HASH = previous;
+  }
+});
+
+test("deployment routes auth to the API without depending on Entra roles", async () => {
   const config = JSON.parse(await readFile(new URL("../../public/staticwebapp.config.json", import.meta.url), "utf8"));
-  const providers = config.auth.identityProviders;
-  assert.deepEqual(Object.keys(providers), ["azureActiveDirectory"]);
-  assert.equal(providers.azureActiveDirectory.registration.openIdIssuer,
-    "https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0");
-  assert.ok(providers.azureActiveDirectory.registration.clientIdSettingName);
-  assert.ok(providers.azureActiveDirectory.registration.clientSecretSettingName);
+  assert.equal(config.auth, undefined);
   const writeRule = config.routes.find((r) => r.route === "/api/myths" && r.methods.includes("PUT"));
-  assert.deepEqual(writeRule.allowedRoles, ["authenticated"]);
+  assert.deepEqual(writeRule.allowedRoles, ["anonymous"]);
+  assert.ok(config.routes.some((r) => r.route === "/api/session" && r.methods.includes("POST")));
+  assert.ok(config.routes.some((r) => r.route === "/.auth/*" && r.statusCode === 404));
   assert.ok(config.navigationFallback.exclude.includes("/api/*"));
   assert.ok(config.navigationFallback.exclude.includes("/.auth/*"));
 });
@@ -184,7 +201,7 @@ test("deployment restricts Microsoft authentication to the exact tenant and prot
 // Exercise the real Blob SDK against a local HTTP fixture, including ETag conditions.
 let server;
 let endpoint;
-let contents;
+const blobs = new Map();
 let version = 0;
 let forcedError;
 const previousConnection = process.env.MYTHS_STORAGE_CONNECTION_STRING;
@@ -196,21 +213,24 @@ before(async () => {
       res.end(`<?xml version="1.0"?><Error><Code>${code}</Code><Message>Local test response</Message></Error>`);
     };
     if (forcedError) return fail(403, forcedError);
+    const path = req.url.split("?")[0];
     if (req.method === "GET") {
-      if (!contents) return fail(404, "BlobNotFound");
+      const entry = blobs.get(path);
+      if (!entry) return fail(404, "BlobNotFound");
       res.writeHead(200, {
-        "Content-Type": "application/json", "Content-Length": Buffer.byteLength(contents),
-        ETag: `"blob-${version}"`, "Last-Modified": new Date().toUTCString(),
+        "Content-Type": "application/json", "Content-Length": Buffer.byteLength(entry.contents),
+        ETag: `"blob-${entry.version}"`, "Last-Modified": new Date().toUTCString(),
       });
-      res.end(contents);
+      res.end(entry.contents);
       return;
     }
-    if (req.headers["if-none-match"] === "*" && contents) return fail(412, "ConditionNotMet");
-    if (req.headers["if-match"] && req.headers["if-match"] !== `"blob-${version}"`) return fail(412, "ConditionNotMet");
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
-    contents = Buffer.concat(chunks).toString("utf8");
+    const entry = blobs.get(path);
+    if (req.headers["if-none-match"] === "*" && entry) return fail(412, "ConditionNotMet");
+    if (req.headers["if-match"] && req.headers["if-match"] !== `"blob-${entry?.version}"`) return fail(412, "ConditionNotMet");
     version++;
+    blobs.set(path, { contents: Buffer.concat(chunks).toString("utf8"), version });
     res.writeHead(201, { ETag: `"blob-${version}"`, "Last-Modified": new Date().toUTCString() });
     res.end();
   });
@@ -247,4 +267,16 @@ test("Blob SDK does not hide permission/configuration errors as a seed fallback"
   } finally {
     forcedError = undefined;
   }
+});
+
+test("persistent login throttle limits all instances atomically and resets after 15 minutes", async () => {
+  const now = Math.floor(Date.now() / 900000) * 900000;
+  const attempts = [];
+  for (let batch = 0; batch < 2; batch++) {
+    attempts.push(...await Promise.all(Array.from({ length: 6 }, () => createLoginLimiter().consume(now))));
+  }
+  assert.equal(attempts.filter((retryAfter) => retryAfter === 0).length, 10);
+  assert.equal(attempts.filter((retryAfter) => retryAfter === 900).length, 2);
+  assert.equal(await createLoginLimiter().consume(now), 900);
+  assert.equal(await createLoginLimiter().consume(now + 900000), 0);
 });

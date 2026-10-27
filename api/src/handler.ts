@@ -1,6 +1,7 @@
 import type { HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { MAX_CATALOGUE_BYTES, validateCatalogue } from "../../src/game/catalogue.js";
 import type { Myth } from "../../src/game/myths.js";
+import { authenticatedEditor, sameOriginJson } from "./auth.js";
 
 export interface Catalogue {
   myths: Myth[];
@@ -14,20 +15,6 @@ export interface CatalogueStore {
 
 export class CatalogueConflict extends Error {}
 
-function authenticatedMicrosoftUser(header: string | null): boolean {
-  if (!header) return false;
-  try {
-    const principal: unknown = JSON.parse(Buffer.from(header, "base64").toString("utf8"));
-    if (typeof principal !== "object" || principal === null) return false;
-    return "identityProvider" in principal && principal.identityProvider === "aad" &&
-      "userId" in principal && typeof principal.userId === "string" && !!principal.userId &&
-      "userRoles" in principal && Array.isArray(principal.userRoles) &&
-      principal.userRoles.includes("authenticated");
-  } catch {
-    return false;
-  }
-}
-
 export function createCatalogueHandler(store: CatalogueStore) {
   return async (request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> => {
     const response = (status: number, jsonBody: unknown): HttpResponseInit => ({
@@ -39,14 +26,15 @@ export function createCatalogueHandler(store: CatalogueStore) {
       return response(405, { error: "Method not allowed." });
     }
     if (request.method === "PUT") {
-      if (!authenticatedMicrosoftUser(request.headers.get("x-ms-client-principal"))) {
-        return response(401, { error: "Sign in with Microsoft to edit myths." });
+      try {
+        if (!authenticatedEditor(request)) {
+          return response(401, { error: "Sign in with the editor password to publish changes." });
+        }
+      } catch (error) {
+        context.error("Editor authentication configuration failed.", error instanceof Error ? error.message : "Unknown error.");
+        return response(503, { error: "Editor authentication is unavailable. Check the server password configuration." });
       }
-      // SWA proxies the API URL; do not compare the browser origin with the Functions hostname.
-      const fetchSite = request.headers.get("sec-fetch-site");
-      if ((fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") ||
-          request.headers.get("x-catalogue-request") !== "1" ||
-          request.headers.get("content-type")?.split(";")[0].trim() !== "application/json") {
+      if (!sameOriginJson(request)) {
         return response(403, { error: "Only same-origin JSON catalogue requests are accepted." });
       }
       const version = request.headers.get("if-match");

@@ -23,8 +23,8 @@
 
 .NOTES
   Requires Azure CLI (az login to the poll's tenant) and GitHub CLI (gh auth login).
-  Requires AAD_CLIENT_ID and AAD_CLIENT_SECRET environment variables for the
-  single-tenant Entra web registration. Provisions paid Standard-tier hosting.
+  Requires EDITOR_PASSWORD_HASH and EDITOR_SESSION_SECRET environment variables.
+  Provisions paid Standard-tier hosting.
 #>
 [CmdletBinding()]
 param(
@@ -40,8 +40,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 function Invoke-Az { $out = az @args; if ($LASTEXITCODE -ne 0) { throw 'Azure CLI command failed. See the Azure CLI error above.' }; $out }
-if (-not $env:AAD_CLIENT_ID -or -not $env:AAD_CLIENT_SECRET) {
-    throw 'Set AAD_CLIENT_ID and AAD_CLIENT_SECRET for the single-tenant Entra web registration before deployment. See README.md. Deployment uses the paid Standard tier.'
+if (-not $env:EDITOR_PASSWORD_HASH -or -not $env:EDITOR_SESSION_SECRET) {
+    throw 'Set EDITOR_PASSWORD_HASH and EDITOR_SESSION_SECRET before deployment. See infra\set-editor-password.ps1 and README.md. Deployment uses the paid Standard tier.'
 }
 
 # 1. Locate the poll app (unless the target was given explicitly).
@@ -80,7 +80,7 @@ $result = Invoke-Az deployment group create `
     --resource-group $ResourceGroup `
     --name "sovereignty-game-$(Get-Date -Format yyyyMMddHHmmss)" `
     --template-file "$PSScriptRoot/main.bicep" `
-    --parameters name=$Name location=$Location aadClientId=$env:AAD_CLIENT_ID aadClientSecret=$env:AAD_CLIENT_SECRET `
+    --parameters name=$Name location=$Location editorPasswordHash=$env:EDITOR_PASSWORD_HASH editorSessionSecret=$env:EDITOR_SESSION_SECRET `
     --query properties.outputs -o json | ConvertFrom-Json
 
 # 4. Deployment token -> GitHub secret.

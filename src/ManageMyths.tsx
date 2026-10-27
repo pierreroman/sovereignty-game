@@ -1,11 +1,27 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { MAX_CATALOGUE_BYTES, validateCatalogue } from "./game/catalogue";
-import { catalogueRequest, type Catalogue } from "./game/catalogue-client";
+import { CatalogueRequestError, catalogueRequest, type Catalogue } from "./game/catalogue-client";
 import { RISK_AREAS, VERDICTS, type Myth, type Verdict } from "./game/myths";
 import "./management.css";
 
-const TENANT_ID = "72f988bf-86f1-41af-91ab-2d7cd011db47";
-const SIGN_IN = "/.auth/login/aad?post_login_redirect_uri=/manage";
+async function sessionRequest(method = "GET", password?: string): Promise<boolean> {
+  const response = await fetch("/api/session", {
+    method, cache: "no-store",
+    ...(method === "GET" ? {} : {
+      headers: { "Content-Type": "application/json", "X-Catalogue-Request": "1" },
+      body: JSON.stringify(password === undefined ? {} : { password }),
+    }),
+  });
+  const body: unknown = await response.json();
+  if (!response.ok) {
+    throw new Error(typeof body === "object" && body !== null && "error" in body && typeof body.error === "string"
+      ? body.error : `Sign-in request failed (${response.status}).`);
+  }
+  if (typeof body !== "object" || body === null || !("authenticated" in body) || typeof body.authenticated !== "boolean") {
+    throw new Error("The server returned an invalid sign-in response.");
+  }
+  return body.authenticated;
+}
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return <label className="management-field"><span>{label}</span>{children}</label>;
@@ -14,6 +30,8 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 export function ManageMyths() {
   const [user, setUser] = useState<string | null>(null);
   const [checking, setChecking] = useState(true);
+  const [password, setPassword] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
   const [saved, setSaved] = useState<Catalogue | null>(null);
   const [draft, setDraft] = useState<Myth[]>([]);
   const [saving, setSaving] = useState(false);
@@ -26,21 +44,8 @@ export function ManageMyths() {
     let active = true;
     async function load() {
       try {
-        const response = await fetch("/.auth/me", { cache: "no-store" });
-        if (!response.ok) throw new Error("Unable to check your sign-in. Please reload to try again.");
-        const body = await response.json();
-        const principal = body.clientPrincipal;
-        if (!principal) return;
-        if (principal.identityProvider !== "aad" || !Array.isArray(principal.userRoles) ||
-            !principal.userRoles.includes("authenticated") ||
-            !Array.isArray(principal.claims) || !principal.claims.some(
-              (claim: { typ?: string; val?: string }) =>
-                (claim.typ === "tid" || claim.typ === "http://schemas.microsoft.com/identity/claims/tenantid") &&
-                claim.val === TENANT_ID,
-            )) {
-          throw new Error("Editing is restricted to the configured Microsoft tenant. Sign out and use an account in that tenant.");
-        }
-        if (active) setUser(principal.userDetails || "Microsoft user");
+        if (!await sessionRequest()) return;
+        if (active) setUser("Editor");
         const catalogue = await catalogueRequest();
         if (active) {
           setSaved(catalogue);
@@ -68,6 +73,42 @@ export function ManageMyths() {
     setNotice("");
   }
 
+  async function signIn() {
+    setAuthBusy(true);
+    setError("");
+    try {
+      if (!await sessionRequest("POST", password)) throw new Error("Sign-in did not establish an editor session.");
+      setUser("Editor");
+      if (!saved) {
+        const catalogue = await catalogueRequest();
+        setSaved(catalogue);
+        setDraft(catalogue.myths);
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to sign in.");
+    } finally {
+      setPassword("");
+      setAuthBusy(false);
+    }
+  }
+
+  async function signOut() {
+    if (dirty && !window.confirm("Discard your unpublished draft and sign out?")) return;
+    setAuthBusy(true);
+    setError("");
+    try {
+      await sessionRequest("DELETE");
+      setUser(null);
+      setSaved(null);
+      setDraft([]);
+      setNotice("");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to sign out.");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
   async function publish() {
     setError("");
     setNotice("");
@@ -93,6 +134,7 @@ export function ManageMyths() {
       setDraft(result.myths);
       setNotice("Published. Players will see the updated myths on their next page load.");
     } catch (reason) {
+      if (reason instanceof CatalogueRequestError && reason.status === 401) setUser(null);
       setError(reason instanceof Error ? reason.message : "Publishing failed. Your draft is still here.");
     } finally {
       setSaving(false);
@@ -103,22 +145,30 @@ export function ManageMyths() {
     <div className="management">
       <header className="management-header">
         <a href="/">Sovereign Cloud Debunkers</a>
-        <a href="/.auth/logout?post_logout_redirect_uri=/manage">Sign out</a>
+        {user && <button type="button" disabled={authBusy || saving} onClick={() => void signOut()}>Sign out</button>}
       </header>
       <main className="management-main">
         <h1>Manage myths</h1>
         <p>Edit the catalogue, verdict summaries, rationale and sources. Publishing updates the game for everyone.</p>
-        {checking && <p role="status">Checking Microsoft sign-in...</p>}
+        {checking && <p role="status">Checking editor sign-in...</p>}
         {!checking && !user && (
           <section className="management-card">
-            <h2>Microsoft tenant sign-in required</h2>
-            <p>Only accounts in the Microsoft tenant can edit. The game remains public.</p>
-            <a className="management-primary" href={SIGN_IN}>Sign in with Microsoft</a>
+            <h2>Editor sign-in required</h2>
+            <p>Enter the shared editor password to make changes. The game remains public.</p>
+            {saved && <p>Your unpublished draft is still here. Sign in again to continue editing.</p>}
+            <form onSubmit={(event) => { event.preventDefault(); void signIn(); }}>
+              <Field label="Editor password">
+                <input type="password" autoComplete="current-password" required maxLength={256}
+                  value={password} disabled={authBusy} onChange={(event) => setPassword(event.target.value)} />
+              </Field>
+              <button className="management-primary" type="submit" disabled={authBusy}>
+                {authBusy ? "Signing in..." : "Sign in"}
+              </button>
+            </form>
           </section>
         )}
         {error && <div role="alert" className="management-error">
           <p>{error}</p>
-          <a href={SIGN_IN}>Sign in again</a>{" · "}
           <button type="button" onClick={() => {
             if (!dirty || window.confirm("Discard your unpublished draft and reload the catalogue?")) window.location.reload();
           }}>Reload catalogue</button>

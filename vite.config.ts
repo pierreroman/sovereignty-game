@@ -13,7 +13,7 @@ export default defineConfig({
       configureServer(server) {
         server.middlewares.use((request, response, next) => {
           const path = request.url?.split("?")[0];
-          if (path !== "/api/myths" && path !== "/.auth/me") return next();
+          if (path !== "/api/myths" && path !== "/api/session") return next();
           response.setHeader("Content-Type", "application/json");
           response.setHeader("Cache-Control", "no-store");
           if (request.method !== "GET") {
@@ -21,8 +21,8 @@ export default defineConfig({
             response.end(JSON.stringify({ error: "Local Vite development is read-only. Use the Static Web Apps emulator to test authenticated editing." }));
             return;
           }
-          response.end(JSON.stringify(path === "/.auth/me"
-            ? { clientPrincipal: null }
+          response.end(JSON.stringify(path === "/api/session"
+            ? { authenticated: false }
             : { myths: MYTHS, version: "seed" }));
         });
       },

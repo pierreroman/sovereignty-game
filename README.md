@@ -5,7 +5,7 @@ Players read a sovereignty myth, vote **Busted**, **Plausible** or **Confirmed**
 **Correct!** / **Incorrect!** pop-up with the verdict, the reasoning, the tradeoff and links to public sources.
 
 React + TypeScript + Vite + Tailwind CSS v4, with a managed Azure Functions API and a private
-Azure Blob Storage catalogue. The game is public; publishing edits requires Microsoft tenant sign-in.
+Azure Blob Storage catalogue. The game is public; publishing edits requires the shared editor password.
 
 ## How it plays
 
@@ -27,11 +27,10 @@ Azure Blob Storage catalogue. The game is public; publishing edits requires Micr
 
 ## Managing myths
 
-Open **Manage myths** in the game footer, or visit `/manage`. Sign in with an account in Microsoft
-Entra tenant **`72f988bf-86f1-41af-91ab-2d7cd011db47`**. Accounts in that tenant (including guests
-allowed by the tenant's policies) can add/remove myths and edit claims, verdicts, qualifiers, risk
-areas, summaries, rationale paragraphs, tradeoffs, and source labels/URLs. No invitation or editor
-role is required within this tenant.
+Open **Manage myths** in the game footer, or visit `/manage`. Sign in with the shared editor
+password to add/remove myths and edit claims, verdicts, qualifiers, risk areas, summaries, rationale
+paragraphs, tradeoffs, and source labels/URLs. Microsoft Entra is not used. Anyone who knows the
+password can edit; there is no longer a Microsoft-tenant identity restriction.
 
 Select **Publish changes** to save the complete catalogue. Players see updates on their next page
 load; a game already in progress keeps its loaded catalogue. Keep existing IDs and display numbers
@@ -49,39 +48,64 @@ without overwriting their work. Your unsaved draft remains on the page; copy any
 to keep before selecting **Reload catalogue**. Leaving the page with unpublished edits triggers a
 browser warning. Drafts are not persisted across browser restarts.
 
-### Authentication and deployment prerequisites
+### Password setup and authentication
 
-**The paid Azure Static Web Apps Standard tier is required.** Free-tier built-in Microsoft
-authentication accepts accounts from any tenant and is intentionally not used. The custom provider
-in [`public/staticwebapp.config.json`](public/staticwebapp.config.json) pins the OpenID issuer to
-the tenant above; Azure validates the login and issues the session. `PUT /api/myths` requires an
-authenticated role at the Azure routing layer and a Microsoft principal in the API. The management
-page also checks the tenant claim. Public `GET /api/myths` never requires authentication. The API
-principal header is trusted only behind Static Web Apps; do not expose this Functions API directly
-or use the development emulator as a public service.
+The API stores only a salted **scrypt** password hash (`N=32768`, `r=8`, `p=3`, 32-byte random salt,
+64-byte derived key) in `EDITOR_PASSWORD_HASH`, plus an independent random signing key in
+`EDITOR_SESSION_SECRET`. Neither belongs in Git, chat, logs, `VITE_*` variables, or browser storage.
+The plaintext password is sent over HTTPS only during sign-in and is never persisted.
 
-Before deploying, create an app registration in that tenant:
+Use Node.js 22.12+ and PowerShell 7 to configure the existing Azure game:
 
-1. In **Microsoft Entra ID > App registrations > New registration**, select **Accounts in this
-   organizational directory only**.
-2. Add a **Web** redirect URI for each hostname you will use:
-   `https://<site-hostname>/.auth/login/aad/callback` (include the default Azure hostname and your
-   custom domain if both will be used).
-3. Under **Authentication**, enable **ID tokens** for the web registration. Only normal OIDC
-   sign-in is needed; do not add Graph application permissions.
-4. Create a client secret and record its expiry. Keep its **value**, not the secret ID, out of Git,
-   chat, workflow logs, and client-side `VITE_*` settings. Rotate it before expiry.
-5. Provide the registration's client ID and secret to the deployment process as environment
-   variables `AAD_CLIENT_ID` and `AAD_CLIENT_SECRET`. Infrastructure stores them in SWA application
-   settings. Never commit a populated parameter file.
+```powershell
+.\infra\set-editor-password.ps1 `
+  -Subscription dfcf7181-677b-4513-932b-75a4642ab752 `
+  -ResourceGroup rg-presentation-poll `
+  -Name sovereignty-game
+```
+
+The script prompts twice with masked input, accepts a 16-256 character passphrase, generates the
+hash and signing key locally, and sets only those two Azure application settings. It does not print
+credentials, write credential files, or change the catalogue/storage connection. Retain the
+password in your password manager and share it only with trusted editors. Do not run the internal
+hashing helper directly: its captured output is intended only for the setup script.
+
+For a new infrastructure deployment, run `.\infra\set-editor-password.ps1 -GenerateOnly` first.
+It sets the two credential environment variables in the current PowerShell process; then run the
+deployment script from that same shell. Clear the variables when finished:
+
+```powershell
+Remove-Item Env:\EDITOR_PASSWORD_HASH, Env:\EDITOR_SESSION_SECRET
+```
+
+`POST /api/session` verifies the password and creates an eight-hour signed session in a
+`Secure`, `HttpOnly`, `SameSite=Strict`, `__Host-` cookie. JavaScript cannot read this cookie.
+`GET /api/session` checks it, and `DELETE /api/session` signs out by clearing this browser's cookie.
+`PUT /api/myths` validates the cookie on the server; SWA identity headers/roles cannot grant access.
+API routes are reachable without a SWA role because this application now owns authorization.
+Public `GET /api/myths` never needs credentials. Missing or invalid password settings fail closed
+for editing without breaking public gameplay. The obsolete `/.auth/*` endpoints return 404.
+
+Login attempts are limited to **10 per fixed 15-minute window across the entire app**, including
+successful logins, using conditional writes to the private `editor-login-attempts.json` blob.
+This survives restarts and multiple instances. A busy/attacked login can temporarily block all
+editors until the next window; this is a deliberately small, shared-editor setup, not an
+enterprise identity system with individual accounts, MFA, or per-user audit trails.
+
+Run the password setup script again to rotate credentials and invalidate **all** existing sessions.
+Normal sign-out clears only this browser's cookie; a copied session token remains valid until
+expiry or credential rotation. If a session expires during editing, sign in again to recover the
+in-memory draft without discarding it.
+
+Password authentication does not require the paid Standard tier, but infrastructure continues to
+use the existing Standard tier. No automatic billing-tier change is made.
 
 The managed Functions runtime does not support managed identity or Key Vault references. Its
 storage connection string is generated by Bicep into server-side SWA settings only; it is never
 sent to the browser. The dedicated storage account disables public blob access and requires TLS
 1.2/HTTPS. Rotate storage keys and update the application setting together when required.
 
-References: [SWA custom authentication](https://learn.microsoft.com/azure/static-web-apps/authentication-custom)
-and [managed API capabilities](https://learn.microsoft.com/azure/static-web-apps/apis-functions).
+Reference: [managed API capabilities](https://learn.microsoft.com/azure/static-web-apps/apis-functions).
 
 > Content review: verdicts and rationale follow the session plan as of Oct 20, 2026. The plan flags
 > Myth 6 and the Copilot in-country wording for CELA/legal confirmation, and statuses (GA / preview)
@@ -118,9 +142,10 @@ and an ignored `api/local.settings.json`:
 
 Run Azurite for local Functions host storage, then `npm --prefix api run build` and
 `swa start http://localhost:5173 --api-location api --swa-config-location public` alongside Vite.
-The SWA CLI emulates authentication locally; it does **not** prove real tenant isolation. Include
-the configured tenant's `tid` claim when emulating a Microsoft principal for the management UI.
-Verify real sign-in on an Azure test deployment before production use.
+Run `.\infra\set-editor-password.ps1 -GenerateOnly` and start the emulator from that same shell so
+the Functions process inherits the two authentication settings. Do not use emulated SWA identity
+roles: the real password/session API enforces editing. Test using HTTPS, or a browser that permits
+Secure cookies on localhost. Verify real sign-in on an Azure test deployment before production use.
 
 ## Deploy to Azure Static Web Apps (next to the live poll)
 
@@ -130,7 +155,7 @@ The game deploys as its **own** Static Web App in the same tenant and subscripti
 ```powershell
 az login --tenant <the poll's tenant>      # same account you used for the poll
 gh auth login
-# Set AAD_CLIENT_ID and AAD_CLIENT_SECRET securely in this shell first.
+.\infra\set-editor-password.ps1 -GenerateOnly
 ./infra/deploy.ps1 -Repo pierreroman/sovereignty-game
 ```
 
@@ -158,7 +183,7 @@ only, so preview deployments cannot publish into the production catalogue.
   application setting pointing to its dedicated storage account, and that the private `myths`
   container exists. The poll's storage must not be reused or modified. A missing `catalogue.json`
   blob is normal before the first publish; a missing connection string or container is not.
-  The storage module can be deployed independently of Entra registration:
+  The storage module can be deployed independently of password setup:
 
   ```powershell
   az deployment group create --subscription <subscription-id> `
@@ -170,25 +195,23 @@ only, so preview deployments cannot publish into the production catalogue.
 
   Configure that account's connection string as the game's server-side
   `MYTHS_STORAGE_CONNECTION_STRING` setting without displaying or committing its value. This
-  restores public catalogue reads independently of `AAD_CLIENT_ID` / `AAD_CLIENT_SECRET`;
-  those two settings remain required for Microsoft sign-in. Verify that `GET /api/myths` returns
+  restores public catalogue reads independently of editor password setup.
+  Verify that `GET /api/myths` returns
   HTTP 200 with a nonempty `myths` array and `version`, and that anonymous `PUT` returns HTTP 401.
-- **Custom `auth` is only supported on Standard:** GitHub Actions deploys application code, not
-  infrastructure. Changing the Bicep SKU does not upgrade an already deployed Free-tier app.
-  Run the infrastructure deployment described above, or explicitly upgrade the game resource:
-  `az staticwebapp update --name sovereignty-game --resource-group rg-presentation-poll --sku Standard`.
-  This changes billing; do not upgrade the separate poll app. The Entra registration settings,
-  private storage container, and API connection string are still required after a tier-only upgrade.
+- **Editor sign-in returns 503:** configure `EDITOR_PASSWORD_HASH` and `EDITOR_SESSION_SECRET`
+  using the masked setup script, and verify catalogue storage is available for the login limiter.
+  A 429 means the shared login window is exhausted; wait for its `Retry-After` interval. Old Entra
+  application settings are no longer used and can be removed after deploying this version.
 - **Unexpected input `skip_api_build`:** the workflow pins a verified revision of the official
   deployment action that declares this input. Both frontend and API are built explicitly before
   upload. Keep the action revision compatible with these inputs when updating it; do not simply
   enable an isolated API source build, because its shared TypeScript sources live outside the
   API directory.
 
-After deployment, verify anonymous gameplay, anonymous write rejection, successful sign-in/publish
-from the configured tenant, rejection of an account outside that tenant, and persistence after a
-page reload. Real Entra sign-in and Azure storage connectivity require the deployed settings and
-cannot be verified by local unit tests.
+After deployment, verify anonymous gameplay/write rejection, incorrect-password rejection,
+successful password sign-in/publish, persistence after reload, and sign-out. Verify that missing,
+expired or tampered session cookies cannot publish. Live sign-in and Azure storage connectivity
+require the deployed settings and cannot be verified by local unit tests.
 
 ## Project layout
 
@@ -199,7 +222,7 @@ public/staticwebapp.config.json  SPA fallback + security headers
 api/                            Protected catalogue API + Blob storage + tests
 src/App.tsx                      Myth page, voting, result pop-up
 src/CatalogueApp.tsx             Load published content before starting the game
-src/ManageMyths.tsx              Tenant sign-in and catalogue editor at /manage
+src/ManageMyths.tsx              Password sign-in and catalogue editor at /manage
 src/game/catalogue.ts            Shared catalogue validation
 src/game/myths.ts                Initial myth catalogue (seed content)
 src/game/pick.ts                 Random / pinned myth selection
