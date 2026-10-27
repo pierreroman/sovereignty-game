@@ -151,6 +151,20 @@ Every push to `main` then runs [`.github/workflows/deploy.yml`](.github/workflow
 install, test, type-check, build, upload the frontend and compiled API. Pull requests run validation
 only, so preview deployments cannot publish into the production catalogue.
 
+### Deployment troubleshooting
+
+- **Custom `auth` is only supported on Standard:** GitHub Actions deploys application code, not
+  infrastructure. Changing the Bicep SKU does not upgrade an already deployed Free-tier app.
+  Run the infrastructure deployment described above, or explicitly upgrade the game resource:
+  `az staticwebapp update --name sovereignty-game --resource-group rg-presentation-poll --sku Standard`.
+  This changes billing; do not upgrade the separate poll app. The Entra registration settings,
+  private storage container, and API connection string are still required after a tier-only upgrade.
+- **Unexpected input `skip_api_build`:** the workflow pins a verified revision of the official
+  deployment action that declares this input. Both frontend and API are built explicitly before
+  upload. Keep the action revision compatible with these inputs when updating it; do not simply
+  enable an isolated API source build, because its shared TypeScript sources live outside the
+  API directory.
+
 After deployment, verify anonymous gameplay, anonymous write rejection, successful sign-in/publish
 from the configured tenant, rejection of an account outside that tenant, and persistence after a
 page reload. Real Entra sign-in and Azure storage connectivity require the deployed settings and
