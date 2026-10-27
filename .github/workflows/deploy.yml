@@ -31,6 +31,10 @@ jobs:
       - name: Test catalogue and API authorization
         run: npm test
 
+      - name: Test password setup without Node
+        shell: pwsh
+        run: .\infra\tests\set-editor-password.test.ps1
+
       - name: Type-check and build frontend and API
         run: |
           npm run build

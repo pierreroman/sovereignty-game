@@ -1,3 +1,4 @@
+#requires -Version 7.2
 [CmdletBinding(DefaultParameterSetName = 'Azure')]
 param(
     [Parameter(Mandatory, ParameterSetName = 'Azure')] [string] $Subscription,
@@ -7,50 +8,57 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$node = (Get-Command node -ErrorAction Stop).Source
-$api = Join-Path $PSScriptRoot '..\api'
-npm --prefix $api run build
-if ($LASTEXITCODE -ne 0) { throw 'Build the API successfully before setting its password.' }
+if (-not $GenerateOnly -and -not (Get-Command az -ErrorAction SilentlyContinue)) {
+    throw 'Azure CLI is required to update Azure settings. Install it or use -GenerateOnly for local credential generation.'
+}
 
-$password = Read-Host 'Editor passphrase (16-256 characters)' -AsSecureString
-$confirmation = Read-Host 'Confirm editor passphrase' -AsSecureString
-$passwordPtr = [IntPtr]::Zero
-$confirmationPtr = [IntPtr]::Zero
-$process = $null
-try {
-    $passwordPtr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($password)
-    $confirmationPtr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($confirmation)
-    $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPtr)
-    if ($plain -cne [Runtime.InteropServices.Marshal]::PtrToStringBSTR($confirmationPtr)) {
-        throw 'Passphrases do not match. No settings have been changed.'
+function ConvertTo-Base64Url([byte[]] $Bytes) {
+    [Convert]::ToBase64String($Bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+$passwordBytes = $null
+while ($null -eq $passwordBytes) {
+    $password = $null
+    $confirmation = $null
+    $passwordPtr = [IntPtr]::Zero
+    $confirmationPtr = [IntPtr]::Zero
+    try {
+        $password = Read-Host 'Editor passphrase (16-256 characters; Ctrl+C to cancel)' -AsSecureString
+        if ($password.Length -lt 16 -or $password.Length -gt 256) {
+            Write-Warning 'Use an editor passphrase between 16 and 256 characters. No settings have been changed. Please enter a new passphrase.'
+            continue
+        }
+        $confirmation = Read-Host 'Confirm editor passphrase' -AsSecureString
+        $passwordPtr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($password)
+        $confirmationPtr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($confirmation)
+        $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPtr)
+        if ($plain -cne [Runtime.InteropServices.Marshal]::PtrToStringBSTR($confirmationPtr)) {
+            Write-Warning 'Passphrases do not match. Use an editor passphrase between 16 and 256 characters and enter the same value to confirm. No settings have been changed. Please enter a new passphrase.'
+            continue
+        }
+        $passwordBytes = [Text.Encoding]::UTF8.GetBytes($plain)
+    } finally {
+        $plain = $null
+        if ($passwordPtr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPtr) }
+        if ($confirmationPtr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($confirmationPtr) }
+        if ($null -ne $password) { $password.Dispose() }
+        if ($null -ne $confirmation) { $confirmation.Dispose() }
     }
-    $start = [Diagnostics.ProcessStartInfo]::new()
-    $start.FileName = $node
-    $start.ArgumentList.Add((Join-Path $api 'scripts\hash-editor-password.mjs'))
-    $start.UseShellExecute = $false
-    $start.RedirectStandardInput = $true
-    $start.RedirectStandardOutput = $true
-    $start.RedirectStandardError = $true
-    $process = [Diagnostics.Process]::Start($start)
-    $process.StandardInput.WriteLine($plain)
-    $process.StandardInput.Close()
-    $plain = $null
-    $result = $process.StandardOutput.ReadToEnd()
-    $failure = $process.StandardError.ReadToEnd()
-    $process.WaitForExit()
-    if ($process.ExitCode -ne 0) { throw "Password hashing failed: $failure" }
-    $credentials = $result | ConvertFrom-Json
-    $env:EDITOR_PASSWORD_HASH = $credentials.passwordHash
-    $env:EDITOR_SESSION_SECRET = $credentials.sessionSecret
-    $result = $null
-    $credentials = $null
+}
+
+$key = $null
+$sessionKey = $null
+try {
+    $salt = [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
+    $key = [Security.Cryptography.Rfc2898DeriveBytes]::Pbkdf2(
+        $passwordBytes, $salt, 600000, [Security.Cryptography.HashAlgorithmName]::SHA256, 32)
+    $sessionKey = [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
+    $env:EDITOR_PASSWORD_HASH = 'pbkdf2-sha256$600000$' + (ConvertTo-Base64Url $salt) + '$' + (ConvertTo-Base64Url $key)
+    $env:EDITOR_SESSION_SECRET = ConvertTo-Base64Url $sessionKey
 } finally {
-    $plain = $null
-    if ($passwordPtr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPtr) }
-    if ($confirmationPtr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($confirmationPtr) }
-    $password.Dispose()
-    $confirmation.Dispose()
-    if ($process) { $process.Dispose() }
+    if ($passwordBytes) { [Array]::Clear($passwordBytes, 0, $passwordBytes.Length) }
+    if ($key) { [Array]::Clear($key, 0, $key.Length) }
+    if ($sessionKey) { [Array]::Clear($sessionKey, 0, $sessionKey.Length) }
 }
 
 if (-not $GenerateOnly) {

@@ -1,10 +1,11 @@
-import { createHmac, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
+import { createHmac, pbkdf2, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 import type { HttpRequest } from "@azure/functions";
 
 const SESSION_SECONDS = 8 * 60 * 60;
 export const SESSION_COOKIE = "__Host-sovereignty-editor";
 const COOKIE_ATTRIBUTES = "Path=/; HttpOnly; Secure; SameSite=Strict";
 const HASH_PATTERN = /^scrypt\$32768\$8\$3\$([A-Za-z0-9_-]{43})\$([A-Za-z0-9_-]{86})$/;
+const PBKDF2_PATTERN = /^pbkdf2-sha256\$600000\$([A-Za-z0-9_-]{43})\$([A-Za-z0-9_-]{43})$/;
 
 export interface AuthConfig {
   passwordHash: string;
@@ -32,7 +33,7 @@ export async function hashPassword(password: string): Promise<string> {
 export function readAuthConfig(): AuthConfig {
   const passwordHash = process.env.EDITOR_PASSWORD_HASH;
   const secret = process.env.EDITOR_SESSION_SECRET;
-  if (!passwordHash || !HASH_PATTERN.test(passwordHash) ||
+  if (!passwordHash || (!HASH_PATTERN.test(passwordHash) && !PBKDF2_PATTERN.test(passwordHash)) ||
       !secret || !/^[A-Za-z0-9_-]{43}$/.test(secret)) {
     throw new Error("Editor password authentication is not configured. Run infra\\set-editor-password.ps1.");
   }
@@ -40,6 +41,16 @@ export function readAuthConfig(): AuthConfig {
 }
 
 export async function verifyPassword(password: string, config: AuthConfig): Promise<boolean> {
+  const pbkdf2Match = PBKDF2_PATTERN.exec(config.passwordHash);
+  if (pbkdf2Match) {
+    const key = await new Promise<Buffer>((resolve, reject) => {
+      pbkdf2(password, Buffer.from(pbkdf2Match[1], "base64url"), 600000, 32, "sha256", (error, derived) => {
+        if (error) reject(error);
+        else resolve(derived);
+      });
+    });
+    return timingSafeEqual(key, Buffer.from(pbkdf2Match[2], "base64url"));
+  }
   const match = HASH_PATTERN.exec(config.passwordHash);
   if (!match) throw new Error("Invalid editor password hash configuration.");
   const key = await derive(password, Buffer.from(match[1], "base64url"));

@@ -50,12 +50,16 @@ browser warning. Drafts are not persisted across browser restarts.
 
 ### Password setup and authentication
 
-The API stores only a salted **scrypt** password hash (`N=32768`, `r=8`, `p=3`, 32-byte random salt,
-64-byte derived key) in `EDITOR_PASSWORD_HASH`, plus an independent random signing key in
+The setup script stores a salted **PBKDF2-SHA256** password hash (600,000 iterations, 32-byte random
+salt, 32-byte derived key) in `EDITOR_PASSWORD_HASH`, plus an independent random signing key in
 `EDITOR_SESSION_SECRET`. Neither belongs in Git, chat, logs, `VITE_*` variables, or browser storage.
 The plaintext password is sent over HTTPS only during sign-in and is never persisted.
 
-Use Node.js 22.12+ and PowerShell 7 to configure the existing Azure game:
+Use PowerShell 7.2+ and Azure CLI to configure the existing Azure game. Password setup does
+**not** require Node.js, npm, or an API build:
+
+When upgrading an older scrypt-only deployment, deploy the updated API before running this
+script so the server can recognize the new PBKDF2 hash format.
 
 ```powershell
 .\infra\set-editor-password.ps1 `
@@ -64,11 +68,13 @@ Use Node.js 22.12+ and PowerShell 7 to configure the existing Azure game:
   -Name sovereignty-game
 ```
 
-The script prompts twice with masked input, accepts a 16-256 character passphrase, generates the
+The script uses masked input and accepts a 16-256 character passphrase. Invalid lengths or mismatched
+confirmation show a reminder of the requirements and prompt for a new passphrase without changing
+settings. Press Ctrl+C to cancel. Once a valid passphrase is confirmed, it generates the
 hash and signing key locally, and sets only those two Azure application settings. It does not print
 credentials, write credential files, or change the catalogue/storage connection. Retain the
-password in your password manager and share it only with trusted editors. Do not run the internal
-hashing helper directly: its captured output is intended only for the setup script.
+password in your password manager and share it only with trusted editors. The API also accepts
+previously configured scrypt hashes (`N=32768`, `r=8`, `p=3`) for compatibility.
 
 For a new infrastructure deployment, run `.\infra\set-editor-password.ps1 -GenerateOnly` first.
 It sets the two credential environment variables in the current PowerShell process; then run the

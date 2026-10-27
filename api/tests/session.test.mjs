@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { pbkdf2Sync, randomBytes } from "node:crypto";
 import { test } from "node:test";
 import functions from "@azure/functions";
 import { authenticatedEditor, hashPassword, issueSession, readAuthConfig, verifyPassword } from "../dist/api/src/auth.js";
@@ -29,6 +29,29 @@ test("scrypt uses random salts, verifies exact passwords, and rejects weak setup
   assert.equal(await verifyPassword(`${password} `, config), false);
   await assert.rejects(() => hashPassword("short"), /16 and 256/);
   await assert.rejects(() => hashPassword("x".repeat(257)), /16 and 256/);
+});
+
+test("native PowerShell PBKDF2 hash format authenticates without changing legacy scrypt support", async () => {
+  const nativePassword = "native-test passphrase with \u00e9";
+  const salt = randomBytes(32);
+  const key = pbkdf2Sync(nativePassword, salt, 600000, 32, "sha256");
+  const nativeHash = `pbkdf2-sha256$600000$${salt.toString("base64url")}$${key.toString("base64url")}`;
+  try {
+    process.env.EDITOR_PASSWORD_HASH = nativeHash;
+    const nativeConfig = readAuthConfig();
+    assert.equal(await verifyPassword(nativePassword, nativeConfig), true);
+    assert.equal(await verifyPassword(`${nativePassword} `, nativeConfig), false);
+    const login = await handler(request({ body: JSON.stringify({ password: nativePassword }) }), context);
+    assert.equal(login.status, 200);
+    assert.equal(authenticatedEditor(request({ headers: { cookie: login.headers["Set-Cookie"].split(";")[0] } })), true);
+    for (const invalid of [nativeHash.replace("$600000$", "$1000$"), nativeHash.slice(0, -1)]) {
+      process.env.EDITOR_PASSWORD_HASH = invalid;
+      assert.throws(() => readAuthConfig(), /not configured/);
+    }
+  } finally {
+    process.env.EDITOR_PASSWORD_HASH = hash;
+  }
+  assert.equal(await verifyPassword(password, readAuthConfig()), true);
 });
 
 test("correct login establishes a secure HTTP-only session; GET checks it without leaking credentials", async () => {
