@@ -65,7 +65,12 @@ $existing = az staticwebapp show --name $Name --resource-group $ResourceGroup --
 if ($existing) { Write-Host "  '$Name' already exists in $ResourceGroup; it will be updated (the poll app is untouched)." }
 
 # 3. Resource group + Static Web App.
-Invoke-Az group create --name $ResourceGroup --location $Location --output none
+$rgExists = (az group exists --name $ResourceGroup) -eq 'true'
+if ($rgExists) {
+    Write-Host "  Using existing resource group $ResourceGroup."
+} else {
+    Invoke-Az group create --name $ResourceGroup --location $Location --output none
+}
 $result = Invoke-Az deployment group create `
     --resource-group $ResourceGroup `
     --name "sovereignty-game-$(Get-Date -Format yyyyMMddHHmmss)" `
