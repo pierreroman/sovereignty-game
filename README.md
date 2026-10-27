@@ -153,6 +153,26 @@ only, so preview deployments cannot publish into the production catalogue.
 
 ### Deployment troubleshooting
 
+- **"Unable to load myths" / `GET /api/myths` returns 503:** application deployment alone does
+  not provision storage. Check that the game has a nonempty `MYTHS_STORAGE_CONNECTION_STRING`
+  application setting pointing to its dedicated storage account, and that the private `myths`
+  container exists. The poll's storage must not be reused or modified. A missing `catalogue.json`
+  blob is normal before the first publish; a missing connection string or container is not.
+  The storage module can be deployed independently of Entra registration:
+
+  ```powershell
+  az deployment group create --subscription <subscription-id> `
+    --resource-group rg-presentation-poll `
+    --template-file .\infra\catalogue-storage.bicep `
+    --parameters name=sovereignty-game location=eastus2 `
+    --query properties.outputs.storageAccountName.value --output tsv
+  ```
+
+  Configure that account's connection string as the game's server-side
+  `MYTHS_STORAGE_CONNECTION_STRING` setting without displaying or committing its value. This
+  restores public catalogue reads independently of `AAD_CLIENT_ID` / `AAD_CLIENT_SECRET`;
+  those two settings remain required for Microsoft sign-in. Verify that `GET /api/myths` returns
+  HTTP 200 with a nonempty `myths` array and `version`, and that anonymous `PUT` returns HTTP 401.
 - **Custom `auth` is only supported on Standard:** GitHub Actions deploys application code, not
   infrastructure. Changing the Bicep SKU does not upgrade an already deployed Free-tier app.
   Run the infrastructure deployment described above, or explicitly upgrade the game resource:

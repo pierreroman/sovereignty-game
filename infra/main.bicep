@@ -46,36 +46,20 @@ resource swa 'Microsoft.Web/staticSites@2023-12-01' = {
   }
 }
 
-resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
-  name: 'myths${uniqueString(resourceGroup().id, name)}'
-  location: location
-  tags: tags
-  sku: { name: 'Standard_LRS' }
-  kind: 'StorageV2'
-  properties: {
-    accessTier: 'Hot'
-    minimumTlsVersion: 'TLS1_2'
-    supportsHttpsTrafficOnly: true
-    allowBlobPublicAccess: false
-    // SWA managed Functions do not support managed identity.
-    allowSharedKeyAccess: true
+var catalogueAccountName = 'myths${uniqueString(resourceGroup().id, name)}'
+
+module catalogueStorage './catalogue-storage.bicep' = {
+  name: '${name}-catalogue-storage'
+  params: {
+    name: name
+    location: location
+    storageAccountName: catalogueAccountName
+    tags: tags
   }
 }
 
-resource blobs 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
-  parent: storage
-  name: 'default'
-  properties: {
-    isVersioningEnabled: true
-    deleteRetentionPolicy: { enabled: true, days: 7 }
-    containerDeleteRetentionPolicy: { enabled: true, days: 7 }
-  }
-}
-
-resource catalogue 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
-  parent: blobs
-  name: 'myths'
-  properties: { publicAccess: 'None' }
+resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
+  name: catalogueAccountName
 }
 
 resource settings 'Microsoft.Web/staticSites/config@2023-12-01' = {
@@ -86,6 +70,7 @@ resource settings 'Microsoft.Web/staticSites/config@2023-12-01' = {
     AAD_CLIENT_SECRET: aadClientSecret
     MYTHS_STORAGE_CONNECTION_STRING: 'DefaultEndpointsProtocol=https;AccountName=${storage.name};AccountKey=${storage.listKeys().keys[0].value};EndpointSuffix=${environment().suffixes.storage}'
   }
+  dependsOn: [catalogueStorage]
 }
 
 output name string = swa.name
