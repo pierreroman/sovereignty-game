@@ -3,3 +3,4 @@ dist/
 *.log
 .env*.local
 .DS_Store
+api/local.settings.json

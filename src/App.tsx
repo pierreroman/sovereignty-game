@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Toaster } from "@/components/ui/sonner";
 import { cn } from "@/lib/utils";
-import { MYTHS, VERDICTS, VERDICT_LABEL, type Myth, type Verdict } from "@/game/myths";
+import { VERDICTS, VERDICT_LABEL, type Myth, type Verdict } from "@/game/myths";
 import { pinnedMyth, randomMyth } from "@/game/pick";
 import { clearProgress, loadProgress, saveProgress, type Progress } from "@/game/storage";
 import { RiskMap } from "@/game/risk-map";
@@ -32,15 +32,15 @@ function initialTheme(): Theme {
   return "dark";
 }
 
-function firstMyth(progress: Progress): { myth: Myth; progress: Progress } {
-  const pinned = pinnedMyth(window.location.search);
+function firstMyth(progress: Progress, myths: Myth[]): { myth: Myth; progress: Progress } {
+  const pinned = pinnedMyth(window.location.search, myths);
   if (pinned) return { myth: pinned, progress };
-  const { myth, resetCycle } = randomMyth(progress.seen);
+  const { myth, resetCycle } = randomMyth(progress.seen, undefined, myths);
   return { myth, progress: resetCycle ? { ...progress, seen: [] } : progress };
 }
 
-export function App() {
-  const [initial] = useState(() => firstMyth(loadProgress()));
+export function App({ myths }: { myths: Myth[] }) {
+  const [initial] = useState(() => firstMyth(loadProgress(), myths));
   const [myth, setMyth] = useState<Myth>(initial.myth);
   const [progress, setProgress] = useState<Progress>(() => ({
     ...initial.progress,
@@ -77,7 +77,7 @@ export function App() {
   };
 
   const nextMyth = () => {
-    const { myth: next, resetCycle } = randomMyth(progress.seen, myth.id);
+    const { myth: next, resetCycle } = randomMyth(progress.seen, myth.id, myths);
     setProgress((p) => ({ ...p, seen: [...(resetCycle ? [] : p.seen), next.id] }));
     setMyth(next);
     setChoice(null);
@@ -127,7 +127,7 @@ export function App() {
           <section aria-labelledby="myth-claim" className="relative px-5 pt-10 pb-8 sm:px-8 sm:pt-12">
             <div className="max-w-[680px]">
               <p className="eyebrow">
-                Myth {myth.number} of {MYTHS.length} · Separating fact from fiction
+                Myth {myth.number} · {myths.length} myths · Separating fact from fiction
               </p>
               <h1
                 id="myth-claim"
@@ -150,7 +150,7 @@ export function App() {
                 </span>
               </span>
               <span className="flex items-center gap-2 text-xs text-lavender">
-                {Math.min(progress.seen.length, MYTHS.length)} of {MYTHS.length} myths seen
+                {myths.filter((item) => progress.seen.includes(item.id)).length} of {myths.length} myths seen
                 {answeredCount > 0 && (
                   <Button
                     variant="ghost"
@@ -233,8 +233,9 @@ export function App() {
       </main>
 
       <footer className="px-5 pt-6 pb-10 text-center text-xs leading-relaxed text-lavender">
-        <p>Six myths. Three verdicts. Your call.</p>
+        <p>{myths.length} myths. Three verdicts. Your call.</p>
         <p>Your answers stay on this device.</p>
+        <a className="mt-2 inline-block underline" href="/manage">Manage myths</a>
       </footer>
 
       <ResultDialog myth={myth} choice={choice} open={open} onOpenChange={setOpen} onNext={nextMyth} />

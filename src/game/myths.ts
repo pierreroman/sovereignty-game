@@ -5,8 +5,9 @@
  * Ignite Session Plan" (updated Oct 20, 2026) and the public Microsoft sources it
  * cites. Statuses (GA / preview) are as of Microsoft Ignite 2026.
  *
- * To add a myth, append an entry to MYTHS. Ids must be unique; the number is
- * only used for display.
+ * This is the initial catalogue, used before the first publish and by Vite's
+ * read-only local preview. Manage published content at /manage.
+ * Ids and numbers must be unique; both support pinned slide links.
  */
 
 export type Verdict = "busted" | "plausible" | "confirmed";

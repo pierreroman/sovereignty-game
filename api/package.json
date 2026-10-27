@@ -1,0 +1,20 @@
+{
+  "name": "sovereignty-game-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/api/src/functions/myths.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.7.2",
+    "@azure/storage-blob": "^12.28.0",
+    "sovereignty-game": "file:.."
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "~5.8.3"
+  }
+}
